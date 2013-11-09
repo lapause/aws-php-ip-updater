@@ -101,9 +101,10 @@ class AwsSecurityGroupUpdater {
          $this->storage = getenv("HOME") . "/.aws/lastip";
       if(!$grabberUrl && !static::$grabberUrl)
          $error = "No IP grabber URL provided";
-      if(!empty($error))
+      if(!empty($error)) {
          static::usage();
-      $this->error($error);
+         $this->error($error);
+      }
       if(!extension_loaded("curl"))
          $this->error("cURL extension must be installed in order for AwsSecurityGroupUpdater to work");
       if(!is_dir(getenv("HOME") . "/.aws"))
@@ -336,9 +337,9 @@ class AwsSecurityGroupUpdaterException extends Exception {}
 if(CLI && pathinfo($_SERVER['SCRIPT_FILENAME'], PATHINFO_BASENAME) == pathinfo(__FILE__, PATHINFO_BASENAME)) {
    $groups = array();
    $port = $protocol = $storage = $grabberUrl = null;
-   foreach(getopt("g:p:t:", array("grabber", "storage")) as $k => $v) {
+   foreach(getopt("g:p:t:", array("grabber:", "storage:")) as $k => $v) {
       if($k == "g")
-         $groups[] = $v;
+         $groups = $v;
       elseif($k == "p")
          $port = $v;
       elseif($k == "t")
