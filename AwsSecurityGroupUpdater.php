@@ -94,7 +94,7 @@ class AwsSecurityGroupUpdater {
       if(!$port && !$this->port)
          $error = "No port provided";
       if($port && !(int) $port)
-         $error = "Port must bean integer";
+         $error = "Port must be an integer";
       if($protocol && !in_array($protocol, $protocols = array("tcp", "udp", "icmp")))
          $error = "Protocol must be one of the following: " . implode(", ", $protocols);
       if(!$storage && !$this->storage)
@@ -225,13 +225,13 @@ class AwsSecurityGroupUpdater {
     * Execute an AWS CLI command, an return the result parsed.
     *
     * @access private
-    * @param  string  $cmd  EC2 command to execute
+    * @param  string  $cmd  AWS command to execute
     * @param  array   $args Command line arguments
     * @return object|array
     * @throws AwsSecurityGroupUpdaterException
     */
    private function exec($cmd, $args = array()) {
-      $cmd = call_user_func_array("sprintf", array_merge(array("aws ec2 " . $cmd), array_map("escapeshellarg", $args)));
+      $cmd = call_user_func_array("sprintf", array_merge(array("aws " . $cmd), array_map("escapeshellarg", $args)));
       try {
          $proc = proc_open($cmd, array(1 => array("pipe", "w"), 2 => array("pipe", "w")), $pipes);
          if(is_resource($proc)) {
@@ -239,11 +239,11 @@ class AwsSecurityGroupUpdater {
             $this->error = stream_get_contents($pipes[2]);
             $ret = proc_close($proc);
             if($ret && $ret != 255)
-               $this->error("An error occured during EC2 command execution");
+               $this->error("An error occured during AWS command execution");
          }
       }
       catch(\Exception $e) {
-         $this->error("An error occured during EC2 command execution");
+         $this->error("An error occured during AWS command execution");
       }
       try {
          $res = json_decode($res);
@@ -290,17 +290,40 @@ class AwsSecurityGroupUpdater {
       if($old && $old != $ip) {
          $this->msg("Old IP references cleanup", true, "underline");
          $filters = sprintf("Name=ip-permission.to-port,Values=%s,Name=ip-permission.protocol,Values=%s,Name=ip-permission.cidr,Values=%s", $this->port, $this->protocol, $old);
-         $refs = $this->groups;
-         $groups = $this->exec("describe-security-groups --group-names" . str_repeat(" %s", count($this->groups)) . " --filters %s", array_merge($this->groups, array($filters)));
-         foreach($groups->SecurityGroups as $group) {
-            unset($refs[array_search($group->GroupName, $refs)]);
-            $this->msg("Removal from " . sprintf("%-30s", $group->GroupName . "..."), false);
-            $this->exec("revoke-security-group-ingress --group-id %s --protocol %s --port %s --cidr %s", array($group->GroupId, $this->protocol, $this->port, $old));
-            $this->msg("ok");
+         $refs = array_filter($this->groups, function($v) {
+            return strpos($v, "rds:") === false;
+         });
+         if(count($refs)) {
+            $groups = $this->exec("ec2 describe-security-groups --group-names" . str_repeat(" %s", count($refs)) . " --filters %s", array_merge($refs, array($filters)));
+            foreach($groups->SecurityGroups as $group) {
+               unset($refs[array_search($group->GroupName, $refs)]);
+               $this->msg("Removal from " . sprintf("%-30s", $group->GroupName . "..."), false);
+               $this->exec("ec2 revoke-security-group-ingress --group-id %s --protocol %s --port %s --cidr %s", array($group->GroupId, $this->protocol, $this->port, $old));
+               $this->msg("ok");
+            }
+            foreach($refs as $ref) {
+               $this->msg("Removal from " . sprintf("%-30s", $ref . "..."), false);
+               $this->msg("n/a");
+            }
          }
-         foreach($refs as $ref) {
-            $this->msg("Removal from " . sprintf("%-30s", $ref . "..."), false);
-            $this->msg("n/a");
+         $refs = array_map(function($v) {
+            return str_replace("rds:", "", $v);
+         }, array_filter($this->groups, function($v) {
+            return strpos($v, "rds:") === 0;
+         }));
+         if(count($refs)) {
+            $groups = $this->exec("rds describe-db-security-groups");
+            foreach($groups->DBSecurityGroups as $group)
+               if(in_array($group->DBSecurityGroupName, $refs)) {
+                  unset($refs[array_search($group->DBSecurityGroupName, $refs)]);
+                  $this->msg("Removal from " . sprintf("%-30s", $group->DBSecurityGroupName . "..."), false);
+                  $this->exec("rds revoke-db-security-group-ingress --db-security-group-name %s --cidrip %s", array($group->DBSecurityGroupName, $old));
+                  $this->msg("ok");
+               }
+            foreach($refs as $ref) {
+               $this->msg("Removal from " . sprintf("%-30s", $ref . "..."), false);
+               $this->msg("n/a");
+            }
          }
       }
       else $this->msg("Nothing to cleanup");
@@ -308,12 +331,27 @@ class AwsSecurityGroupUpdater {
 
       // We add new IP to security groups
       $this->msg("Adding current IP to security groups", true, "underline");
-      $groups = $this->exec("describe-security-groups --group-names" . str_repeat(" %s", count($this->groups)), $this->groups);
+      $refs = array_filter($this->groups, function($v) {
+         return strpos($v, "rds:") === false;
+      });
+      $groups = $this->exec("ec2 describe-security-groups --group-names" . str_repeat(" %s", count($refs)), $refs);
       foreach($groups->SecurityGroups as $group) {
          $this->msg("Adding to " . sprintf("%-33s", $group->GroupName . "..."), false);
-         $this->exec("authorize-security-group-ingress --group-id %s --protocol %s --port %s --cidr %s", array($group->GroupId, $this->protocol, $this->port, $ip));
+         $this->exec("ec2 authorize-security-group-ingress --group-id %s --protocol %s --port %s --cidr %s", array($group->GroupId, $this->protocol, $this->port, $ip));
          $this->msg("ok");
       }
+      $refs = array_map(function($v) {
+         return str_replace("rds:", "", $v);
+      }, array_filter($this->groups, function($v) {
+         return strpos($v, "rds:") === 0;
+      }));
+      $groups = $this->exec("rds describe-db-security-groups");
+      foreach($groups->DBSecurityGroups as $group)
+         if(in_array($group->DBSecurityGroupName, $refs)) {
+            $this->msg("Adding to " . sprintf("%-33s", $group->DBSecurityGroupName . "..."), false);
+            $this->exec("rds authorize-db-security-group-ingress --db-security-group-name %s --cidrip %s", array($group->DBSecurityGroupName, $ip));
+            $this->msg("ok");
+         }
       $this->msg();
 
       // We update last IP storage
